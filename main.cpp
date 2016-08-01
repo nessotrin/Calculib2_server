@@ -1,264 +1,470 @@
+#include "List.h"
+
 #include <SFML/Network.hpp>
 #include <iostream>
 #include <cstdlib>
+#include <cstring>
+
+#define DEFAULT_PORT 63000
+#define DEFAULT_BUFFER_SIZE 8192
+#define DEFAULT_QUIET 0
 
 
-unsigned char * sharedBuffer;
-int sharedBufferSize = 8192;
-int port = 63000;
 
-struct clientContext{
-    sf::TcpSocket clients[2];
-    bool clientsConnected[2] = {false,false};
+struct buffer{
+    unsigned char * pointer;
+    int size;
 };
 
+struct client{
+    sf::TcpSocket * socket;
+};
 
-void drawStats(clientContext * context)
-{
-    std::cout << "\rClients : [";
-    for(int id = 0 ; id < 2 ; id++)
+class ClientList{
+
+private:
+    List<client*> clients;
+    int maxClientCount;
+public:
+    
+    bool setMaxClient(int newMaxClientCount)
     {
-        if(context->clientsConnected[id])
+        maxClientCount = maxClientCount;
+    }
+    
+    bool isFull()
+    {
+        return clients.getSize() == maxClientCount;
+    }
+    int getConnectedCount()
+    {
+        clients.getSize();
+    }
+    
+    
+    void addClient(client * newClient)
+    {
+        clients.add(newClient);
+    }
+    
+    void removeClient(int id)
+    {
+        clients.remove(id);
+    }
+    
+    
+    client * getClient(int id)
+    {
+        return clients.get(id);
+    }
+    
+    int getMaxClientCount()
+    {
+        return maxClientCount;
+    }
+
+
+};
+
+class Logger{
+private:
+    bool beQuiet = false;
+    bool debugLog = false;
+public:
+    void printLog(const char * text)
+    {
+        if(!beQuiet || debugLog)
         {
-            std::cout << "X";
+            printf("%s\n",text);
+        }
+    }
+    void printError(const char * text)
+    {
+        printf("ERROR: %s\n",text);
+    }
+    void printDebug(const char * text)
+    {
+        if(debugLog)
+        {
+            printf("DEBUG: %s\n",text);
+        }
+    }
+    void setQuiet(bool newQuiet)
+    {
+        beQuiet = newQuiet;
+    }
+    void setDebug(bool newDebugLog)
+    {
+        debugLog = newDebugLog;
+    }
+};
+
+static Logger logger;  //global logger
+
+
+void checkArgCount(int count, const char * arg, int requiered)
+{
+    if(count < requiered)
+    {
+        printf("Bad argument: \"%s\" requires %d arguments (%d provided) !\n",arg,requiered, count);
+        exit(1);
+    }
+}
+
+void helpArgs()
+{
+    printf("USAGE: calculib_server [ARGS]\n");
+    printf(" -p, --port    Select the port to be used                   Default: %d\n",DEFAULT_PORT);
+    printf(" -b, --buffer  Set the maximum size of the exchange buffer  Default: %d\n",DEFAULT_BUFFER_SIZE);
+    printf(" -q, --quiet   Prints only errors                           Default: %d\n",DEFAULT_QUIET);
+    printf(" -h, --help    Prints this help\n");
+}
+
+void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool * quiet)
+{
+    for(int i = 1 ; i < argc ; i++)
+    {
+        if(strcmp(argv[i],"--port") || strcmp(argv[i],"-p"))
+        {
+            checkArgCount(i-argc-1, argv[i], 1);
+            
+            *port = strtol(argv[i+1],NULL,10);
+        }
+        else if(strcmp(argv[i],"--buffer") || strcmp(argv[i],"-b"))
+        {
+            checkArgCount(i-argc-1, argv[i], 1);
+     
+            *bufferSize = strtol(argv[i+1],NULL,10);
+        }
+        else if(strcmp(argv[i],"--quiet") || strcmp(argv[i],"-q"))
+        {
+            *quiet = true;
         }
         else
         {
-            std::cout << " ";
-        }
-        if(id == 0)
-        {
-            std::cout << "|";
+            if(! (strcmp(argv[i],"--help") || strcmp(argv[i],"-h")) )
+            {
+                printf("Invalid argument ! \"%s\"\n",argv[i]);
+            }
+            helpArgs();
         }
     }
-    std::cout << "]";
-    
-    fflush(stdout);
 }
 
-void disconnect(int id, clientContext * context)
+
+
+void printInfo(int port, int bufferSize)
 {
-    context->clientsConnected[id] = false;
-    context->clients[id].disconnect();
-    drawStats(context);
+    std::cout << "Calculib server V2.0 from the NESSCASDK project" << std::endl;
+    std::cout << "By Nessotrin for the Casio community, 2016" << std::endl;
+    std::cout << "Port: " << port << std::endl;
+    std::cout << "Buffer size: " << bufferSize << "o" << std::endl;
 }
 
-sf::Socket::Status sendData(unsigned char * buffer, int size, int id, clientContext * context)
+
+bool sendBuffer(sf::TcpSocket * socket, buffer * toSend)
 {
-    std::size_t sent;
     std::size_t totalSent = 0;
-    sf::Socket::Status result;
-    while(totalSent < size)
-    {
-        result = context->clients[id].send(buffer, size, sent);
-        if (result != sf::Socket::Done && result != sf::Socket::NotReady)
-        {
-            if(result == sf::Socket::Error)
-            {
-                printf("\nSocket ERROR !\n");
-            }
-            disconnect(id, context);
-            return result;
-        }
-        if(result == sf::Socket::Done) // prevents any garbage value
-        {
-            totalSent += sent;
-        }
-    }
-    return result;
-}
-sf::Socket::Status receiveData(unsigned char * buffer, int* size, int max, int id, clientContext * context)
-{
-    std::size_t received;
-    *size = 0;
-    // TCP socket:
-    sf::Socket::Status result = context->clients[id].receive(buffer, max, received);
-    if(result != sf::Socket::Done && result != sf::Socket::NotReady)
-    {
-        if(result == sf::Socket::Error)
-        {
-            printf("\nSocket ERROR !\n");
-        }
-        disconnect(id,context);
-    }
-    if(result == sf::Socket::Done && received > 0)
-    {
-        *size = received;
-    }
-    return result;
-}
-
-
-void checkClient(int id, clientContext * context)
-{
-    std::size_t received;
-    // TCP socket:
-    int result = context->clients[id].receive(sharedBuffer, sharedBufferSize, received);
-    if(result != sf::Socket::Done && result != sf::Socket::NotReady)
-    {
-        if(result == sf::Socket::Error)
-        {
-            printf("\nSocket ERROR !\n");
-        }
-        disconnect(id,context);
-    }
-    if(received > 0 && context->clientsConnected[!id])
-    {
-        if(sendData(sharedBuffer, received, !id, context))
-        {
-            return;
-        }
-    }
-}
-
-#include <cstring> //memcmp
-
-// return true if client accepted
-bool acceptClient(bool reject, int id, clientContext * context, sf::TcpListener * listener)
-{
-    // accept a new connection
-    context->clients[id].setBlocking(true);
-
-    int result = listener->accept(context->clients[id]);
-    if(result == sf::Socket::Done)
-    {
-        context->clientsConnected[id] = true;
-        unsigned char buffer[17];
-        int received;
-        
-        int receiveResult;
-        for(int i = 0 ; i < 200 ; i++) // 2s
-        {
-            receiveResult = receiveData(buffer,&received,17,id,context);
-            if(receiveResult != sf::Socket::NotReady)
-            {
-                break;
-            }
-            sf::sleep(sf::milliseconds(10));
-        }
-        if(receiveResult != sf::Socket::Done || received != 17 || memcmp("CALCULIB2_CONNECT",buffer,17) != 0)
-        {
-            printf("Unknown tried to connect ...\n");
-            //ignore the client
-        }
-        else
-        {
-            if(reject)
-            {
-                if(sendData((unsigned char *)"CALCULIB2_SERVER_FULL", 21, id, context))
-                {
-                    disconnect(id, context);
-                    return false;
-                }
-                drawStats(context);
-                disconnect(id, context);
-            }
-            else
-            {
-                if(sendData((unsigned char *)"CALCULIB2_ACCEPTED", 18, id, context))
-                {
-                    disconnect(id, context);
-                    return false;
-                }
-                context->clients[id].setBlocking(false);
-                drawStats(context);
-                return true;
-            }
-        }
-    }
-    else if(result != sf::Socket::NotReady)
-    {
-        printf("\nCan't accept client !\n");
-    }
     
+    int workSize = toSend->size;
+    unsigned char * workPointer = toSend->pointer;
+    
+    while(workSize > 0)
+    {
+        sf::Socket::Status result = socket->send(workPointer, workSize, totalSent);
+        if(result == sf::Socket::Error || result ==  sf::Socket::Disconnected)
+        {
+            return true;
+        }
+        if(result == sf::Socket::Done)
+        {
+            workSize -= totalSent;
+            workPointer += totalSent;
+        }
+    }
+    return false;    
+}
+
+//1 = critical error
+bool receiveBuffer(sf::TcpSocket * socket, buffer * toFill, int max)
+{
+    std::size_t received;
+    //printf("SOCKET- %lu\n",(unsigned long)socket);
+    sf::Socket::Status result = socket->receive(toFill->pointer, max, received);
+    toFill->size = received;
+    
+    if(result == sf::Socket::Error || result == sf::Socket::Disconnected)
+    {
+        if(result == sf::Socket::Disconnected)
+        printf("ERROR: %d\n",result);
+        return true;
+    }
+
     return false;
 }
 
+bool receiveBufferWithTimeout(sf::TcpSocket * socket, buffer * toFill, int max, int timeout)
+{
+    toFill->size = 0;
+    while(timeout > 0)
+    {
+        if(receiveBuffer(socket,toFill,max))
+        {
+            return true;
+        }
+        
+        if(toFill->size > 0)
+        {
+            break;
+        }
+        
+        sf::sleep(sf::milliseconds(10));
+        timeout -= 10;
+    }
+    return false;
+}
+
+
+void sendFullMessage(sf::TcpSocket * socket)
+{
+    buffer toSend;
+    toSend.pointer = (unsigned char *) "CALCULIB2_SERVER_FULL";
+    toSend.size = 21;
+    sendBuffer(socket, &toSend);
+    logger.printLog("Full: Refused a client !");
+}
+//1 = error
+bool connectProtocol(sf::TcpSocket * socket)
+{
+    unsigned char data[17];
+    buffer inputBuffer;
+    inputBuffer.pointer = data;
+    
+    logger.printDebug("Starting protocol connect");
+    
+    if(receiveBufferWithTimeout(socket,&inputBuffer,17,5000))
+    {
+        logger.printDebug("Protocol abort, receive error");
+        return 1;
+    }
+    if(inputBuffer.size == 17 && memcmp("CALCULIB2_CONNECT",inputBuffer.pointer,17) == 0)
+    {
+        logger.printDebug("Received connection marker");
+        buffer toSendBuffer;
+        toSendBuffer.size = 18;
+        toSendBuffer.pointer = (unsigned char *) "CALCULIB2_ACCEPTED";
+        if(sendBuffer(socket,&toSendBuffer))
+        {
+            logger.printDebug("Protocol abort, send error");
+            return 1;
+        }
+    }
+    else
+    {
+        logger.printLog("Unknown connection refused !");
+        return 1;
+    }
+}
+
+void setupListener(sf::TcpListener * listener, int port)
+{
+    // bind the listener to a port
+    if (listener->listen(port) != sf::Socket::Done)
+    {
+        logger.printError("Could not bind to the port !");
+        logger.printError("Tip: Change the port or wait a couple seconds");
+        exit(1);
+    }
+    listener->setBlocking(false);
+}
+
+//return 1 if accepted
+bool listenerAccept(sf::TcpListener * listener, sf::TcpSocket * socket)
+{
+    
+    int result = listener->accept(*socket);
+    if(result == sf::Socket::Error)
+    {
+        logger.printError("LISTENER ACCEPT ERROR !");
+    }
+    else if(result == sf::Socket::Done)
+    {
+        logger.printLog("Client requesting connection ...");
+        
+        std::size_t read;
+        if(socket->receive(NULL, 0, read) == sf::Socket::Disconnected)
+        {
+            logger.printLog("Fast disconnected !");
+            return 0;
+        }
+        
+        return 1;
+    }
+    
+    return 0;
+}
+
+
+void killClient(ClientList * list, int id)
+{
+    logger.printLog("Client disconnected !");
+    printf("ID %d\n",id);
+    
+    list->getClient(id)->socket->disconnect();
+    delete(list->getClient(id)->socket);
+    
+    delete(list->getClient(id));
+    list->removeClient(id);
+}
+
+sf::TcpSocket * acceptSocket; // don't recreate it every time
+
+void setupAcceptSocket()
+{
+    acceptSocket = new sf::TcpSocket;
+    if(acceptSocket == NULL)
+    {
+        printf("ERROR: can't alloc new socket !\n");
+        exit(1);
+    }
+    acceptSocket->setBlocking(false);
+}
+
+void answerToClient(ClientList * list, sf::TcpListener * listener)
+{
+    if(list->isFull())
+    {
+        
+        while(listenerAccept(listener,acceptSocket))
+        {
+            logger.printDebug("Refusing");
+            sendFullMessage(acceptSocket);
+            acceptSocket->disconnect();
+        }
+        
+    }
+    else
+    {
+        while(!list->isFull())
+        {
+            if(!listenerAccept(listener,acceptSocket)) // no client
+            {
+                break;
+            }
+
+            logger.printDebug("Going to try protocol");
+            
+            printf("SOCKET %lu\n",(unsigned long)acceptSocket);
+            
+            if(connectProtocol(acceptSocket))
+            {
+                acceptSocket->disconnect();
+                logger.printDebug("Killed because protocol");
+                continue;
+            }
+
+            client * newClient = new client;
+            newClient->socket = acceptSocket;
+
+            setupAcceptSocket(); //reset for the next client
+
+            list->addClient(newClient);
+            
+            logger.printLog("Client connected !");
+            printf("ID %lu\n",(unsigned long)newClient);
+            
+            sf::sleep(sf::milliseconds(500));
+        }
+        
+    }    
+}
+
+
+void dispatchMessage(ClientList * list, buffer * message, int senderId)
+{
+    for(int i = 0 ; i < list->getConnectedCount() ; i++)
+    {
+        if(i != senderId)
+        {
+            logger.printDebug("dispatching ...");
+            printf("To %d\n",i);
+            if(sendBuffer(list->getClient(i)->socket,message))
+            {
+                killClient(list,i);
+            }
+        }
+    }
+}
+
+void checkForInputs(ClientList * list, buffer * exchangeBuffer)
+{
+    buffer workExchangeBuffer; // use a copy to keep the size
+    workExchangeBuffer.pointer = exchangeBuffer->pointer;
+    for(int i = 0 ; i < list->getConnectedCount() ; i++)
+    {
+        if(receiveBuffer(list->getClient(i)->socket,&workExchangeBuffer,exchangeBuffer->size))
+        {
+            killClient(list,i);
+        }
+        if(workExchangeBuffer.size > 0)
+        {
+            logger.printDebug("Got data, dispatching");
+            printf("From %d\n",i);
+            dispatchMessage(list,&workExchangeBuffer,i);                
+        }
+    }
+}
+
+
+void setupExchangeBuffer(buffer * exchangeBuffer, int bufferSize)
+{
+    exchangeBuffer->pointer = (unsigned char *) malloc(bufferSize);
+    if(exchangeBuffer->pointer == NULL)
+    {
+        printf("ERROR, can't alloc the exchange buffer !\n");
+        exit(1);
+    }
+    exchangeBuffer->size = bufferSize;
+}
+
+
+
+#define CLIENT_COUNT 2
+
 int main (int argc, const char * argv[]) {
     
-    
+    int port = 63000;    
+    int bufferSize = 8192;
+    bool isQuiet = false;
 
+    readArgs(argc,argv,&port,&bufferSize,&isQuiet);
+
+    logger.setQuiet(isQuiet);
+    logger.setDebug(true);
     
-    if(argc == 3)
+    if(!isQuiet)
     {
-        sharedBufferSize = strtol(argv[2],NULL,10);
-        port = strtol(argv[1],NULL,10);
-        
+        printInfo(port,bufferSize);
     }
-    if(argc == 2)
-    {
-        port = strtol(argv[1],NULL,10);
-    }
-        
-    std::cout << "Calculib server V1.1" << std::endl;
-    std::cout << "From the NESSCASDK project" << std::endl;
-    std::cout << "By Nessotrin for the Casio community, 2016" << std::endl;
-    std::cout << "Using: Calculib Protocol V1" << std::endl;
-    std::cout << "  This server is a simple repeater betwen 2 clients with a plain message SERVER_GOOD_DONE or SERVER_EXIT_FULL" << std::endl;
-    std::cout << "Use with one argument to set the port" << std::endl;
-    std::cout << "Use with two argument to set the port and the transfere buffer size" << std::endl;
-    std::cout << "Buffer size: " << sharedBufferSize << "o" << std::endl;
-    std::cout << "Port: " << port << std::endl;
     
     sf::TcpListener listener;
-
-    // bind the listener to a port
-    if (listener.listen(port) != sf::Socket::Done)
+    setupListener(&listener, port);
+    
+    ClientList list;
+    list.setMaxClient(CLIENT_COUNT);
+    
+    buffer exchangeBuffer;
+    setupExchangeBuffer(&exchangeBuffer, bufferSize);
+    
+    setupAcceptSocket();
+    
+    logger.printLog("Init'ed ...");
+    
+    while(1) //TODO receive system interrupts
     {
-        printf("Can't listen on the port !\n");
-        return 1;
+        answerToClient(&list, &listener);
+        checkForInputs(&list, &exchangeBuffer);
     }
-    listener.setBlocking(false);
-    
-    clientContext context;
-
-    for(int i = 0 ; i < 2 ; i++)
-    {
-        context.clients[i].setBlocking(false);
-    }
-    
-    sharedBuffer = (unsigned char *)malloc(sharedBufferSize);
-    if(sharedBuffer == NULL)
-    {
-        std::cout << "Out of memory on buffer creation !\n" << std::endl;
-        return 1;
-    }
-    
-    drawStats(&context);
-    
-    while(1) //can't stop server
-    {
-        for(int id = 0 ; id < 2 ; id++)
-        {
-            if(!context.clientsConnected[id])
-            {
-                if(acceptClient(false,id,&context,&listener))
-                {
-                    printf("Client accepted ...\n");
-                    context.clientsConnected[id] = true;
-                }
-            }
-            else
-            {
-                checkClient(id, &context);
-            }
-
-        }
-        if(context.clientsConnected[0] && context.clientsConnected[1])
-        {
-            clientContext rejectionContext;
-            if(acceptClient(true,0,&rejectionContext,&listener))
-            {
-                std::cout << std::endl << "SERVER FULL: client rejected !" << std::endl;
-            }
-        }
-        
-        sf::sleep(sf::milliseconds(20));
-    }
-
-
-    
-    
     
     return 0;
 }
