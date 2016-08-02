@@ -23,7 +23,7 @@ private:
 public:
     T get(unsigned int id);
     void set(unsigned int id, T);
-    void add(T);
+    unsigned int add(T);
     void remove(unsigned int id);
     void searchAndRemove(T data);
     unsigned int getSize();
@@ -51,7 +51,7 @@ template <class T> void List<T>::set(unsigned int id, T data)
     table[id] = data;
 }
 
-template <class T> void List<T>::add(T data)
+template <class T> unsigned int List<T>::add(T data)
 {
     if(size+1 > allocSize) // out of slot
     {
@@ -60,6 +60,7 @@ template <class T> void List<T>::add(T data)
     
     table[size] = data;
     size++;
+    return size-1;
 }
 template <class T> void List<T>::searchAndRemove(T data)
 {

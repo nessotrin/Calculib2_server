@@ -8,62 +8,52 @@
 #define DEFAULT_PORT 63000
 #define DEFAULT_BUFFER_SIZE 8192
 #define DEFAULT_QUIET 0
+#define DEFAULT_MAXCLIENT 2
 
 
-
-struct buffer{
+struct Buffer{
     unsigned char * pointer;
     int size;
 };
 
-struct client{
+class Client{
+public: 
     sf::TcpSocket * socket;
+    bool isReady = false;
 };
 
-class ClientList{
-
-private:
-    List<client*> clients;
-    int maxClientCount;
+class AnswerDataSet //only one argument per thread, packs everything for the answerClient thread
+{
 public:
-    
-    bool setMaxClient(int newMaxClientCount)
+    AnswerDataSet(List<Client*>* newList, sf::Mutex * newListMutex, int newPort, int newMaxClient)
     {
-        maxClientCount = maxClientCount;
+        list = newList;
+        listMutex = newListMutex;
+        port = newPort;
+        maxClient = newMaxClient;
     }
     
-    bool isFull()
-    {
-        return clients.getSize() == maxClientCount;
-    }
-    int getConnectedCount()
-    {
-        clients.getSize();
-    }
+    List<Client*> * list;
+    sf::Mutex * listMutex;
+    int port;
+    int maxClient;
+};
     
-    
-    void addClient(client * newClient)
-    {
-        clients.add(newClient);
-    }
-    
-    void removeClient(int id)
-    {
-        clients.remove(id);
-    }
-    
-    
-    client * getClient(int id)
-    {
-        return clients.get(id);
-    }
-    
-    int getMaxClientCount()
-    {
-        return maxClientCount;
-    }
 
-
+class ConnectDataSet //only one argument per thread, packs everything for the ConnectClient thread
+{
+public:
+    ConnectDataSet(List<Client*>* newList, sf::Mutex * newListMutex, int newClientId)
+    {
+        list = newList;
+        listMutex = newListMutex;
+        clientId = newClientId;
+    }
+    
+    List<Client*> * list;
+    sf::Mutex * listMutex;
+    int clientId;
+    
 };
 
 class Logger{
@@ -114,13 +104,14 @@ void checkArgCount(int count, const char * arg, int requiered)
 void helpArgs()
 {
     printf("USAGE: calculib_server [ARGS]\n");
-    printf(" -p, --port    Select the port to be used                   Default: %d\n",DEFAULT_PORT);
-    printf(" -b, --buffer  Set the maximum size of the exchange buffer  Default: %d\n",DEFAULT_BUFFER_SIZE);
-    printf(" -q, --quiet   Prints only errors                           Default: %d\n",DEFAULT_QUIET);
+    printf(" -p, --port    Select the port to be used                              Default: %d\n",DEFAULT_PORT);
+    printf(" -b, --buffer Size of the exchange buffer                             Default: %d\n",DEFAULT_BUFFER_SIZE);
+    printf(" -q, --quiet   Prints only errors                                           Default: %d\n",DEFAULT_QUIET);
+    printf(" -m, --max   Maximum number of simultaneous client         Default: %d\n",DEFAULT_MAXCLIENT);
     printf(" -h, --help    Prints this help\n");
 }
 
-void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool * quiet)
+void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool * quiet, int * maxClient)
 {
     for(int i = 1 ; i < argc ; i++)
     {
@@ -140,6 +131,12 @@ void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool 
         {
             *quiet = true;
         }
+        else if(strcmp(argv[i],"--max") || strcmp(argv[i],"-m"))
+        {
+            checkArgCount(i-argc-1, argv[i], 1);
+     
+            *maxClient = strtol(argv[i+1],NULL,10);
+        }
         else
         {
             if(! (strcmp(argv[i],"--help") || strcmp(argv[i],"-h")) )
@@ -153,16 +150,16 @@ void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool 
 
 
 
-void printInfo(int port, int bufferSize)
+void printInfo(int port, int BufferSize)
 {
     std::cout << "Calculib server V2.0 from the NESSCASDK project" << std::endl;
     std::cout << "By Nessotrin for the Casio community, 2016" << std::endl;
     std::cout << "Port: " << port << std::endl;
-    std::cout << "Buffer size: " << bufferSize << "o" << std::endl;
+    std::cout << "Buffer size: " << BufferSize << "o" << std::endl;
 }
 
 
-bool sendBuffer(sf::TcpSocket * socket, buffer * toSend)
+bool sendBuffer(sf::TcpSocket * socket, Buffer * toSend)
 {
     std::size_t totalSent = 0;
     
@@ -186,7 +183,7 @@ bool sendBuffer(sf::TcpSocket * socket, buffer * toSend)
 }
 
 //1 = critical error
-bool receiveBuffer(sf::TcpSocket * socket, buffer * toFill, int max)
+bool receiveBuffer(sf::TcpSocket * socket, Buffer * toFill, int max)
 {
     std::size_t received;
     //printf("SOCKET- %lu\n",(unsigned long)socket);
@@ -203,10 +200,11 @@ bool receiveBuffer(sf::TcpSocket * socket, buffer * toFill, int max)
     return false;
 }
 
-bool receiveBufferWithTimeout(sf::TcpSocket * socket, buffer * toFill, int max, int timeout)
+bool receiveBufferWithTimeout(sf::TcpSocket * socket, Buffer * toFill, int max, int timeout)
 {
     toFill->size = 0;
-    while(timeout > 0)
+    sf::Clock timer;
+    while(timer.getElapsedTime().asMilliseconds() < timeout)
     {
         if(receiveBuffer(socket,toFill,max))
         {
@@ -219,7 +217,6 @@ bool receiveBufferWithTimeout(sf::TcpSocket * socket, buffer * toFill, int max, 
         }
         
         sf::sleep(sf::milliseconds(10));
-        timeout -= 10;
     }
     return false;
 }
@@ -227,43 +224,78 @@ bool receiveBufferWithTimeout(sf::TcpSocket * socket, buffer * toFill, int max, 
 
 void sendFullMessage(sf::TcpSocket * socket)
 {
-    buffer toSend;
+    Buffer toSend;
     toSend.pointer = (unsigned char *) "CALCULIB2_SERVER_FULL";
     toSend.size = 21;
     sendBuffer(socket, &toSend);
-    logger.printLog("Full: Refused a client !");
+    logger.printLog("Full: Refused a Client !");
 }
-//1 = error
-bool connectProtocol(sf::TcpSocket * socket)
+
+void killClient(List<Client*> * list, int id)
 {
-    unsigned char data[17];
-    buffer inputBuffer;
-    inputBuffer.pointer = data;
+    logger.printLog("Client disconnected !");
+    printf("ID %d\n",id);
+    
+    list->get(id)->socket->disconnect();
+    delete(list->get(id)->socket);
+    
+    delete(list->get(id));
+    list->remove(id);
+}
+
+void killClientMutexed(List<Client*> * list, sf::Mutex * listMutex, int id)
+{
+    listMutex->lock();
+    killClient(list,id);
+    listMutex->unlock();
+}
+
+//1 = error
+void connectProtocol(ConnectDataSet data)// data: List<Client *> list ; sf:Mutex listMutex ; int id
+{
+    unsigned char inputData[17];
+    Buffer inputBuffer;
+    inputBuffer.pointer = inputData;
     
     logger.printDebug("Starting protocol connect");
+    data.listMutex->lock();
+    sf::TcpSocket * socket = data.list->get(data.clientId)->socket;
+    data.listMutex->unlock();
     
-    if(receiveBufferWithTimeout(socket,&inputBuffer,17,1000))
+    bool failed = false;
+    
+    if(receiveBufferWithTimeout(socket,&inputBuffer,17,500))
     {
         logger.printDebug("Protocol abort, receive error");
-        return 1;
+        killClientMutexed(data.list, data.listMutex, data.clientId);
+        return;
     }
+    
     if(inputBuffer.size == 17 && memcmp("CALCULIB2_CONNECT",inputBuffer.pointer,17) == 0)
     {
         logger.printDebug("Received connection marker");
-        buffer toSendBuffer;
+        Buffer toSendBuffer;
         toSendBuffer.size = 18;
         toSendBuffer.pointer = (unsigned char *) "CALCULIB2_ACCEPTED";
         if(sendBuffer(socket,&toSendBuffer))
         {
             logger.printDebug("Protocol abort, send error");
-            return 1;
+            killClientMutexed(data.list, data.listMutex, data.clientId);
+            return;
         }
     }
     else
     {
         logger.printLog("Unknown connection refused !");
-        return 1;
+        killClientMutexed(data.list, data.listMutex, data.clientId);
+        return;
     }
+
+    data.listMutex->lock();
+    data.list->get(data.clientId)->isReady = true;
+    data.listMutex->unlock();
+
+    //KILLs THE THREAD
 }
 
 void setupListener(sf::TcpListener * listener, int port)
@@ -305,17 +337,9 @@ bool listenerAccept(sf::TcpListener * listener, sf::TcpSocket * socket)
 }
 
 
-void killClient(ClientList * list, int id)
-{
-    logger.printLog("Client disconnected !");
-    printf("ID %d\n",id);
-    
-    list->getClient(id)->socket->disconnect();
-    delete(list->getClient(id)->socket);
-    
-    delete(list->getClient(id));
-    list->removeClient(id);
-}
+
+
+sf::Thread * acceptThread;
 
 sf::TcpSocket * acceptSocket; // don't recreate it every time
 
@@ -330,63 +354,82 @@ void setupAcceptSocket()
     acceptSocket->setBlocking(false);
 }
 
-void answerToClient(ClientList * list, sf::TcpListener * listener)
+#define MAX_CLIENT 2
+
+void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, sf::Mutex * listMutex, int port
 {
-    if(list->isFull())
-    {
-        
-        while(listenerAccept(listener,acceptSocket))
-        {
-            logger.printDebug("Refusing");
-            sendFullMessage(acceptSocket);
-            acceptSocket->disconnect();
-        }
-        
-    }
-    else
-    {
-        while(!list->isFull())
-        {
-            if(!listenerAccept(listener,acceptSocket)) // no client
-            {
-                break;
-            }
+    sf::TcpListener listener;
+    setupListener(&listener, data.port);
+    
+    setupAcceptSocket();
 
-            logger.printDebug("Going to try protocol");
-            
-            printf("SOCKET %lu\n",(unsigned long)acceptSocket);
-            
-            if(connectProtocol(acceptSocket))
+    while(1)
+    {
+        data.listMutex->lock();
+        bool isFull = (data.list->getSize() == MAX_CLIENT);
+        data.listMutex->unlock();
+        if(isFull)
+        {
+            while(listenerAccept(&listener,acceptSocket))
             {
+                logger.printDebug("Refusing");
+                sendFullMessage(acceptSocket);
                 acceptSocket->disconnect();
-                logger.printDebug("Killed because protocol");
-                continue;
             }
-
-            client * newClient = new client;
-            newClient->socket = acceptSocket;
-
-            setupAcceptSocket(); //reset for the next client
-
-            list->addClient(newClient);
-            
-            logger.printLog("Client connected !");
-            printf("ID %lu\n",(unsigned long)newClient);
         }
+        else
+        {
+            while(data.list->getSize() < MAX_CLIENT && listenerAccept(&listener,acceptSocket))
+            {
+                //create the new Client
+                Client * newClient = new Client;
+                if(newClient == NULL)
+                {
+                    printf("Failed to allocate Client\n");
+                    exit(1);
+                }
+                newClient->socket = acceptSocket;
+                data.listMutex->lock();
+                int ClientId = data.list->add(newClient);
+                data.listMutex->unlock();
+                
+                //create and launch a protocol connect thread
+                sf::Thread * newConnectThread = new sf::Thread(&connectProtocol,ConnectDataSet(data.list,data.listMutex,ClientId));
+                if(newConnectThread == NULL)
+                {
+                    printf("Failed to allocate thread\n");
+                    exit(1);                    
+                }
+                newConnectThread->launch();
+
+                setupAcceptSocket(); //reset for the next Client
+                
+
+                data.listMutex->lock();
+                isFull = (data.list->getSize() == MAX_CLIENT);
+                data.listMutex->unlock();
+                if(isFull) // stops accepting if full
+                {
+                    break;
+                }
+            }
+            
+        }    
         
-    }    
+        sf::sleep(sf::milliseconds(10));
+    }
 }
 
 
-void dispatchMessage(ClientList * list, buffer * message, int senderId)
+void dispatchMessage(List<Client*> * list, Buffer * message, int senderId)
 {
-    for(int i = 0 ; i < list->getConnectedCount() ; i++)
+    for(int i = 0 ; i < list->getSize() ; i++)
     {
         if(i != senderId)
         {
             logger.printDebug("dispatching ...");
             printf("To %d\n",i);
-            if(sendBuffer(list->getClient(i)->socket,message))
+            if(sendBuffer(list->get(i)->socket,message))
             {
                 killClient(list,i);
             }
@@ -394,48 +437,52 @@ void dispatchMessage(ClientList * list, buffer * message, int senderId)
     }
 }
 
-void checkForInputs(ClientList * list, buffer * exchangeBuffer)
+void checkForInputs(List<Client*> * list, sf::Mutex * listMutex, Buffer * exchangeBuffer)
 {
-    buffer workExchangeBuffer; // use a copy to keep the size
+    Buffer workExchangeBuffer; // use a copy to keep the size
     workExchangeBuffer.pointer = exchangeBuffer->pointer;
-    for(int i = 0 ; i < list->getConnectedCount() ; i++)
+    
+    listMutex->lock();
+    for(int i = 0 ; i < list->getSize() ; i++)
     {
-        if(receiveBuffer(list->getClient(i)->socket,&workExchangeBuffer,exchangeBuffer->size))
+        if(list->get(i)->isReady)
         {
-            killClient(list,i);
-        }
-        if(workExchangeBuffer.size > 0)
-        {
-            logger.printDebug("Got data, dispatching");
-            printf("From %d\n",i);
-            dispatchMessage(list,&workExchangeBuffer,i);                
+            if(receiveBuffer(list->get(i)->socket,&workExchangeBuffer,exchangeBuffer->size))
+            {
+                killClient(list,i);
+            }
+            if(workExchangeBuffer.size > 0)
+            {
+                logger.printDebug("Got data, dispatching");
+                printf("From %d\n",i);
+                dispatchMessage(list,&workExchangeBuffer,i);                
+            }
         }
     }
+    listMutex->unlock();
 }
 
 
-void setupExchangeBuffer(buffer * exchangeBuffer, int bufferSize)
+void setupExchangeBuffer(Buffer * exchangeBuffer, int bufferSize)
 {
     exchangeBuffer->pointer = (unsigned char *) malloc(bufferSize);
     if(exchangeBuffer->pointer == NULL)
     {
-        printf("ERROR, can't alloc the exchange buffer !\n");
+        printf("ERROR, can't alloc the exchange Buffer !\n");
         exit(1);
     }
     exchangeBuffer->size = bufferSize;
 }
 
 
+int main (int argc, const char * argv[]) 
+{
+    int port = DEFAULT_PORT;    
+    int bufferSize = DEFAULT_BUFFER_SIZE;
+    bool isQuiet = DEFAULT_QUIET;
+    int maxClient = DEFAULT_MAXCLIENT;
 
-#define CLIENT_COUNT 2
-
-int main (int argc, const char * argv[]) {
-    
-    int port = 63000;    
-    int bufferSize = 8192;
-    bool isQuiet = false;
-
-    readArgs(argc,argv,&port,&bufferSize,&isQuiet);
+    readArgs(argc,argv,&port,&bufferSize,&isQuiet,&maxClient);
 
     logger.setQuiet(isQuiet);
     logger.setDebug(true);
@@ -445,23 +492,20 @@ int main (int argc, const char * argv[]) {
         printInfo(port,bufferSize);
     }
     
-    sf::TcpListener listener;
-    setupListener(&listener, port);
+    List<Client*> list;
+    sf::Mutex listMutex;
     
-    ClientList list;
-    list.setMaxClient(CLIENT_COUNT);
-    
-    buffer exchangeBuffer;
+    Buffer exchangeBuffer;
     setupExchangeBuffer(&exchangeBuffer, bufferSize);
-    
-    setupAcceptSocket();
-    
+
     logger.printLog("Init'ed ...");
+    
+    sf::Thread answerThread(&answerToClient,AnswerDataSet(&list,&listMutex,port,maxClient));
+    answerThread.launch();
     
     while(1) //TODO receive system interrupts
     {
-        answerToClient(&list, &listener);
-        checkForInputs(&list, &exchangeBuffer);
+        checkForInputs(&list, &listMutex,&exchangeBuffer);
         sf::sleep(sf::milliseconds(5));
     }
     
