@@ -242,7 +242,7 @@ bool connectProtocol(sf::TcpSocket * socket)
     
     logger.printDebug("Starting protocol connect");
     
-    if(receiveBufferWithTimeout(socket,&inputBuffer,17,5000))
+    if(receiveBufferWithTimeout(socket,&inputBuffer,17,1000))
     {
         logger.printDebug("Protocol abort, receive error");
         return 1;
@@ -372,8 +372,6 @@ void answerToClient(ClientList * list, sf::TcpListener * listener)
             
             logger.printLog("Client connected !");
             printf("ID %lu\n",(unsigned long)newClient);
-            
-            sf::sleep(sf::milliseconds(500));
         }
         
     }    
@@ -464,6 +462,7 @@ int main (int argc, const char * argv[]) {
     {
         answerToClient(&list, &listener);
         checkForInputs(&list, &exchangeBuffer);
+        sf::sleep(sf::milliseconds(5));
     }
     
     return 0;
