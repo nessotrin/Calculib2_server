@@ -380,19 +380,19 @@ bool listenerAccept(sf::TcpListener * listener, sf::TcpSocket * socket)
 
 sf::Thread * acceptThread;
 
-void allocateNewSocket(sf::TcpSocket * socket)
+void allocateNewSocket(sf::TcpSocket ** socket)
 {
-    socket = new sf::TcpSocket;
-    if(socket == NULL)
+    (*socket) = new sf::TcpSocket;
+    if((*socket) == NULL)
     {
         printf("ERROR: can't alloc new socket !\n");
         exit(1);
     }
-    socket->setBlocking(false);
+    (*socket)->setBlocking(false);
 }
 
 
-void prepareClient(ClientsContainer * container, sf::TcpSocket * acceptSocket)
+void prepareClient(ClientsContainer * container, sf::TcpSocket ** acceptSocket)
 {
     //create the new Client
     Client * newClient = new Client;
@@ -401,7 +401,7 @@ void prepareClient(ClientsContainer * container, sf::TcpSocket * acceptSocket)
         printf("Failed to allocate Client\n");
         exit(1);
     }
-    newClient->socket = acceptSocket;
+    newClient->socket = *acceptSocket;
     container->containerMutex->lock();
     container->selector->add(*newClient->socket);
     int ClientId = container->list->add(newClient);
@@ -434,7 +434,7 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
     
     
     sf::TcpSocket * acceptSocket; // always keep one allocated
-    allocateNewSocket(acceptSocket);
+    allocateNewSocket(&acceptSocket);
 
     while(1)
     {
@@ -454,7 +454,7 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
         {
             while(listenerAccept(&listener,acceptSocket))
             {
-                prepareClient(data.container,acceptSocket);
+                prepareClient(data.container,&acceptSocket);
                 
                 data.container->containerMutex->lock();
                 isFull = (data.container->list->getSize() == data.maxClient);
