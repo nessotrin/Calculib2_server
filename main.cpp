@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#include <signal.h>
+
 
 #define DEFAULT_PORT 63000
 #define DEFAULT_BUFFER_SIZE 8192
@@ -11,6 +13,9 @@
 #define DEFAULT_DEBUG 0
 #define DEFAULT_MAXCLIENT 2
 
+
+sf::Mutex stopThreadsMutex;
+bool stopThreads = false;
 
 struct Buffer{
     unsigned char * pointer;
@@ -350,6 +355,9 @@ void setupListener(sf::TcpListener * listener, int port)
 }
 
 //return 1 if accepted
+
+
+
 bool listenerAccept(sf::TcpListener * listener, sf::TcpSocket * socket)
 {
     
@@ -370,21 +378,53 @@ bool listenerAccept(sf::TcpListener * listener, sf::TcpSocket * socket)
 }
 
 
-
-
 sf::Thread * acceptThread;
 
-sf::TcpSocket * acceptSocket; // don't recreate it every time
-
-void setupAcceptSocket()
+void allocateNewSocket(sf::TcpSocket * socket)
 {
-    acceptSocket = new sf::TcpSocket;
-    if(acceptSocket == NULL)
+    socket = new sf::TcpSocket;
+    if(socket == NULL)
     {
         printf("ERROR: can't alloc new socket !\n");
         exit(1);
     }
-    acceptSocket->setBlocking(false);
+    socket->setBlocking(false);
+}
+
+
+void prepareClient(ClientsContainer * container, sf::TcpSocket * acceptSocket)
+{
+    //create the new Client
+    Client * newClient = new Client;
+    if(newClient == NULL)
+    {
+        printf("Failed to allocate Client\n");
+        exit(1);
+    }
+    newClient->socket = acceptSocket;
+    container->containerMutex->lock();
+    container->selector->add(*newClient->socket);
+    int ClientId = container->list->add(newClient);
+    container->containerMutex->unlock();
+    
+    //create and launch a protocol connect thread
+    sf::Thread * newConnectThread = new sf::Thread(&connectProtocol,ConnectDataSet(container,ClientId));
+    if(newConnectThread == NULL)
+    {
+        printf("Failed to allocate thread\n");
+        exit(1);                    
+    }
+    newConnectThread->launch();
+
+    allocateNewSocket(acceptSocket); //reset for the next Client
+}
+
+bool checkStopThreads()
+{
+    stopThreadsMutex.lock();
+    bool result = stopThreads;
+    stopThreadsMutex.unlock();
+    return result;
 }
 
 void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, sf::Mutex * listMutex, int port
@@ -392,7 +432,9 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
     sf::TcpListener listener;
     setupListener(&listener, data.port);
     
-    setupAcceptSocket();
+    
+    sf::TcpSocket * acceptSocket; // always keep one allocated
+    allocateNewSocket(acceptSocket);
 
     while(1)
     {
@@ -412,31 +454,8 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
         {
             while(listenerAccept(&listener,acceptSocket))
             {
-                //create the new Client
-                Client * newClient = new Client;
-                if(newClient == NULL)
-                {
-                    printf("Failed to allocate Client\n");
-                    exit(1);
-                }
-                newClient->socket = acceptSocket;
-                data.container->containerMutex->lock();
-                data.container->selector->add(*newClient->socket);
-                int ClientId = data.container->list->add(newClient);
-                data.container->containerMutex->unlock();
+                prepareClient(data.container,acceptSocket);
                 
-                //create and launch a protocol connect thread
-                sf::Thread * newConnectThread = new sf::Thread(&connectProtocol,ConnectDataSet(data.container,ClientId));
-                if(newConnectThread == NULL)
-                {
-                    printf("Failed to allocate thread\n");
-                    exit(1);                    
-                }
-                newConnectThread->launch();
-
-                setupAcceptSocket(); //reset for the next Client
-                
-
                 data.container->containerMutex->lock();
                 isFull = (data.container->list->getSize() == data.maxClient);
                 data.container->containerMutex->unlock();
@@ -447,6 +466,13 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
             }
             
         }    
+        
+
+        if(checkStopThreads())
+        {
+            return;
+        }
+        
         
         sf::sleep(sf::milliseconds(10));
     }
@@ -496,7 +522,13 @@ void checkForInputs(CheckDataSet data)
             }
         }
         data.container->containerMutex->unlock();
+
+        if(checkStopThreads())
+        {
+            return;
+        }
         sf::sleep(sf::milliseconds(1)); // give time for the other threads
+        
     }    
 }
 
@@ -512,6 +544,13 @@ void setupExchangeBuffer(Buffer * exchangeBuffer, int bufferSize)
     exchangeBuffer->size = bufferSize;
 }
 
+void signalHandler(int num)
+{
+    printf("Server shutting down !\n");
+    stopThreadsMutex.lock();
+    stopThreads = true;
+    stopThreadsMutex.unlock();
+}
 
 int main (int argc, const char * argv[]) 
 {
@@ -521,6 +560,9 @@ int main (int argc, const char * argv[])
     bool isDebug = DEFAULT_DEBUG;
     int maxClient = DEFAULT_MAXCLIENT;
 
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
+    
     readArgs(argc,argv,&port,&bufferSize,&isQuiet,&isDebug,&maxClient);
 
     logger.setQuiet(isQuiet);
@@ -551,8 +593,12 @@ int main (int argc, const char * argv[])
     sf::Thread checkThread(&checkForInputs,CheckDataSet(&container,&exchangeBuffer));
     checkThread.launch();
     
-    while(1) //TODO receive system interrupts
+    while(1) //TODO graphic stats
     {
+        if(checkStopThreads())
+        {
+            break;
+        }
         sf::sleep(sf::milliseconds(5));
     }
     
