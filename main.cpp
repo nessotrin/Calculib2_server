@@ -8,6 +8,7 @@
 #define DEFAULT_PORT 63000
 #define DEFAULT_BUFFER_SIZE 8192
 #define DEFAULT_QUIET 0
+#define DEFAULT_DEBUG 0
 #define DEFAULT_MAXCLIENT 2
 
 
@@ -91,55 +92,70 @@ public:
 
 static Logger logger;  //global logger
 
-
-void checkArgCount(int count, const char * arg, int requiered)
+int getNextArgValue(int argc, const char * argv[], int pos)
 {
-    if(count < requiered)
+    if(argc-pos-1 == 0) // no argument next
     {
-        printf("Bad argument: \"%s\" requires %d arguments (%d provided) !\n",arg,requiered, count);
+        printf("Bad argument count: \"%s\" requires 1 arguments !\n",argv[pos]);
         exit(1);
     }
+    
+    int value = strtol(argv[pos+1],NULL,10);
+                
+    if(value == 0) // 0 = bad value OR 0 = convertion error
+    {
+        printf("Bad argument value: \"%s\" requires a non 0 value !\n",argv[pos]);
+        exit(1);                
+    }
+    
+    return value;
+}
+void checkArgCount(int count, const char * arg, int requiered)
+{
+
 }
 
 void helpArgs()
 {
     printf("USAGE: calculib_server [ARGS]\n");
-    printf(" -p, --port    Select the port to be used                              Default: %d\n",DEFAULT_PORT);
+    printf(" -p, --port    Select the port to be used                                Default: %d\n",DEFAULT_PORT);
     printf(" -b, --buffer Size of the exchange buffer                             Default: %d\n",DEFAULT_BUFFER_SIZE);
-    printf(" -q, --quiet   Prints only errors                                           Default: %d\n",DEFAULT_QUIET);
+    printf(" -q, --quiet   Prints only errors                                              Default: %d\n",DEFAULT_QUIET);
+    printf(" -d, --debug  Prints debug info                                             Default: %d\n",DEFAULT_DEBUG);
     printf(" -m, --max   Maximum number of simultaneous client         Default: %d\n",DEFAULT_MAXCLIENT);
     printf(" -h, --help    Prints this help\n");
 }
 
-void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool * quiet, int * maxClient)
+void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool * isQuiet, bool * isDebug, int * maxClient)
 {
     for(int i = 1 ; i < argc ; i++)
     {
-        if(strcmp(argv[i],"--port") || strcmp(argv[i],"-p"))
+        if(strcmp(argv[i],"--port") == 0 || strcmp(argv[i],"-p") == 0 )
         {
-            checkArgCount(i-argc-1, argv[i], 1);
-            
-            *port = strtol(argv[i+1],NULL,10);
+            *port = getNextArgValue(argc,argv,i);
+            i++;
         }
-        else if(strcmp(argv[i],"--buffer") || strcmp(argv[i],"-b"))
+        else if(strcmp(argv[i],"--buffer") == 0 || strcmp(argv[i],"-b") == 0 )
         {
-            checkArgCount(i-argc-1, argv[i], 1);
-     
-            *bufferSize = strtol(argv[i+1],NULL,10);
+            *bufferSize = getNextArgValue(argc,argv,i);
+            i++;
         }
-        else if(strcmp(argv[i],"--quiet") || strcmp(argv[i],"-q"))
+        else if(strcmp(argv[i],"--quiet") == 0 || strcmp(argv[i],"-q") == 0 )
         {
-            *quiet = true;
+            *isQuiet = true;
         }
-        else if(strcmp(argv[i],"--max") || strcmp(argv[i],"-m"))
+        else if(strcmp(argv[i],"--debug") == 0 || strcmp(argv[i],"-d") == 0 )
         {
-            checkArgCount(i-argc-1, argv[i], 1);
-     
-            *maxClient = strtol(argv[i+1],NULL,10);
+            *isDebug = true;
+        }
+        else if(strcmp(argv[i],"--max")  == 0 || strcmp(argv[i],"-m") == 0 )
+        {
+            *maxClient = getNextArgValue(argc,argv,i);
+            i++;        
         }
         else
         {
-            if(! (strcmp(argv[i],"--help") || strcmp(argv[i],"-h")) )
+            if(! (strcmp(argv[i],"--help") == 0 || strcmp(argv[i],"-h") == 0 ) )
             {
                 printf("Invalid argument ! \"%s\"\n",argv[i]);
             }
@@ -150,12 +166,14 @@ void readArgs(int argc, const char * argv[], int * port, int * bufferSize, bool 
 
 
 
-void printInfo(int port, int BufferSize)
+void printInfo(int port, int bufferSize, bool isDebug, int maxClient)
 {
     std::cout << "Calculib server V2.0 from the NESSCASDK project" << std::endl;
     std::cout << "By Nessotrin for the Casio community, 2016" << std::endl;
     std::cout << "Port: " << port << std::endl;
-    std::cout << "Buffer size: " << BufferSize << "o" << std::endl;
+    std::cout << "Buffer size: " << bufferSize << "o" << std::endl;
+    std::cout << "Debug mode: "  << (isDebug?"yes":"no") << std::endl;
+    std::cout << "Max client: " << maxClient << std::endl;
 }
 
 
@@ -192,8 +210,6 @@ bool receiveBuffer(sf::TcpSocket * socket, Buffer * toFill, int max)
     
     if(result == sf::Socket::Error || result == sf::Socket::Disconnected)
     {
-        if(result == sf::Socket::Disconnected)
-        printf("ERROR: %d\n",result);
         return true;
     }
 
@@ -232,10 +248,7 @@ void sendFullMessage(sf::TcpSocket * socket)
 }
 
 void killClient(List<Client*> * list, int id)
-{
-    logger.printLog("Client disconnected !");
-    printf("ID %d\n",id);
-    
+{   
     list->get(id)->socket->disconnect();
     delete(list->get(id)->socket);
     
@@ -291,6 +304,7 @@ void connectProtocol(ConnectDataSet data)// data: List<Client *> list ; sf:Mutex
         return;
     }
 
+    logger.printLog("Client sucessfully connected !");
     data.listMutex->lock();
     data.list->get(data.clientId)->isReady = true;
     data.listMutex->unlock();
@@ -315,22 +329,16 @@ bool listenerAccept(sf::TcpListener * listener, sf::TcpSocket * socket)
 {
     
     int result = listener->accept(*socket);
+
+    if(result == sf::Socket::Done)
+    {
+        logger.printLog("Client requesting connection ...");
+        return 1;
+    }
+    
     if(result == sf::Socket::Error)
     {
         logger.printError("LISTENER ACCEPT ERROR !");
-    }
-    else if(result == sf::Socket::Done)
-    {
-        logger.printLog("Client requesting connection ...");
-        
-        std::size_t read;
-        if(socket->receive(NULL, 0, read) == sf::Socket::Disconnected)
-        {
-            logger.printLog("Fast disconnected !");
-            return 0;
-        }
-        
-        return 1;
     }
     
     return 0;
@@ -354,8 +362,6 @@ void setupAcceptSocket()
     acceptSocket->setBlocking(false);
 }
 
-#define MAX_CLIENT 2
-
 void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, sf::Mutex * listMutex, int port
 {
     sf::TcpListener listener;
@@ -366,7 +372,7 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
     while(1)
     {
         data.listMutex->lock();
-        bool isFull = (data.list->getSize() == MAX_CLIENT);
+        bool isFull = (data.list->getSize() == data.maxClient);
         data.listMutex->unlock();
         if(isFull)
         {
@@ -379,7 +385,7 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
         }
         else
         {
-            while(data.list->getSize() < MAX_CLIENT && listenerAccept(&listener,acceptSocket))
+            while(listenerAccept(&listener,acceptSocket))
             {
                 //create the new Client
                 Client * newClient = new Client;
@@ -406,7 +412,7 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
                 
 
                 data.listMutex->lock();
-                isFull = (data.list->getSize() == MAX_CLIENT);
+                isFull = (data.list->getSize() == data.maxClient);
                 data.listMutex->unlock();
                 if(isFull) // stops accepting if full
                 {
@@ -428,9 +434,9 @@ void dispatchMessage(List<Client*> * list, Buffer * message, int senderId)
         if(i != senderId)
         {
             logger.printDebug("dispatching ...");
-            printf("To %d\n",i);
             if(sendBuffer(list->get(i)->socket,message))
             {
+                logger.printLog("Client disconnected !");
                 killClient(list,i);
             }
         }
@@ -449,12 +455,12 @@ void checkForInputs(List<Client*> * list, sf::Mutex * listMutex, Buffer * exchan
         {
             if(receiveBuffer(list->get(i)->socket,&workExchangeBuffer,exchangeBuffer->size))
             {
+                logger.printLog("Client disconnected !");
                 killClient(list,i);
             }
             if(workExchangeBuffer.size > 0)
             {
                 logger.printDebug("Got data, dispatching");
-                printf("From %d\n",i);
                 dispatchMessage(list,&workExchangeBuffer,i);                
             }
         }
@@ -480,16 +486,17 @@ int main (int argc, const char * argv[])
     int port = DEFAULT_PORT;    
     int bufferSize = DEFAULT_BUFFER_SIZE;
     bool isQuiet = DEFAULT_QUIET;
+    bool isDebug = DEFAULT_DEBUG;
     int maxClient = DEFAULT_MAXCLIENT;
 
-    readArgs(argc,argv,&port,&bufferSize,&isQuiet,&maxClient);
+    readArgs(argc,argv,&port,&bufferSize,&isQuiet,&isDebug,&maxClient);
 
     logger.setQuiet(isQuiet);
-    logger.setDebug(true);
+    logger.setDebug(isDebug);
     
     if(!isQuiet)
     {
-        printInfo(port,bufferSize);
+        printInfo(port,bufferSize,isDebug,maxClient);
     }
     
     List<Client*> list;
