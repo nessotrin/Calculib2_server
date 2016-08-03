@@ -23,38 +23,58 @@ public:
     bool isReady = false;
 };
 
+class ClientsContainer{
+public:
+    ClientsContainer(List<Client*> * newList, sf::Mutex * newContainerMutex, sf::SocketSelector * newSelector)
+    {
+        list = newList;
+        containerMutex = newContainerMutex;
+        selector = newSelector;
+    }
+    List<Client*> * list;
+    sf::Mutex * containerMutex;
+    sf::SocketSelector * selector;
+};
+
 class AnswerDataSet //only one argument per thread, packs everything for the answerClient thread
 {
 public:
-    AnswerDataSet(List<Client*>* newList, sf::Mutex * newListMutex, int newPort, int newMaxClient)
+    AnswerDataSet(ClientsContainer * newContainer, int newPort, int newMaxClient)
     {
-        list = newList;
-        listMutex = newListMutex;
+        container = newContainer;
         port = newPort;
         maxClient = newMaxClient;
     }
     
-    List<Client*> * list;
-    sf::Mutex * listMutex;
+    ClientsContainer * container;
     int port;
     int maxClient;
 };
+  
+class CheckDataSet //only one argument per thread, packs everything for the checkClient thread
+{
+public:
+    CheckDataSet(ClientsContainer * newContainer, Buffer * newExchangeBuffer)
+    {
+        container = newContainer;
+        exchangeBuffer = newExchangeBuffer;
+    }
     
+    ClientsContainer * container;
+    Buffer * exchangeBuffer;
+};  
 
 class ConnectDataSet //only one argument per thread, packs everything for the ConnectClient thread
 {
 public:
-    ConnectDataSet(List<Client*>* newList, sf::Mutex * newListMutex, int newClientId)
+    ConnectDataSet(ClientsContainer * newContainer, int newClientId)
     {
-        list = newList;
-        listMutex = newListMutex;
+        container = newContainer;
         clientId = newClientId;
     }
-    
-    List<Client*> * list;
-    sf::Mutex * listMutex;
+
+    ClientsContainer * container;
     int clientId;
-    
 };
 
 class Logger{
@@ -247,40 +267,42 @@ void sendFullMessage(sf::TcpSocket * socket)
     logger.printLog("Full: Refused a Client !");
 }
 
-void killClient(List<Client*> * list, int id)
+void killClient(ClientsContainer * container, int id)
 {   
-    list->get(id)->socket->disconnect();
-    delete(list->get(id)->socket);
-    
-    delete(list->get(id));
-    list->remove(id);
+    //socket
+    container->list->get(id)->socket->disconnect();
+    container->selector->remove(*container->list->get(id)->socket);
+    delete(container->list->get(id)->socket);
+    //client
+    delete(container->list->get(id));
+    container->list->remove(id);
 }
 
-void killClientMutexed(List<Client*> * list, sf::Mutex * listMutex, int id)
+void killClientMutexed(ClientsContainer * container, int id)
 {
-    listMutex->lock();
-    killClient(list,id);
-    listMutex->unlock();
+    container->containerMutex->lock();
+    killClient(container,id);
+    container->containerMutex->unlock();
 }
 
 //1 = error
-void connectProtocol(ConnectDataSet data)// data: List<Client *> list ; sf:Mutex listMutex ; int id
+void connectProtocol(ConnectDataSet data)
 {
     unsigned char inputData[17];
     Buffer inputBuffer;
     inputBuffer.pointer = inputData;
     
     logger.printDebug("Starting protocol connect");
-    data.listMutex->lock();
-    sf::TcpSocket * socket = data.list->get(data.clientId)->socket;
-    data.listMutex->unlock();
+    data.container->containerMutex->lock();
+    sf::TcpSocket * socket = data.container->list->get(data.clientId)->socket;
+    data.container->containerMutex->unlock();
     
     bool failed = false;
     
     if(receiveBufferWithTimeout(socket,&inputBuffer,17,500))
     {
         logger.printDebug("Protocol abort, receive error");
-        killClientMutexed(data.list, data.listMutex, data.clientId);
+        killClientMutexed(data.container, data.clientId);
         return;
     }
     
@@ -293,23 +315,26 @@ void connectProtocol(ConnectDataSet data)// data: List<Client *> list ; sf:Mutex
         if(sendBuffer(socket,&toSendBuffer))
         {
             logger.printDebug("Protocol abort, send error");
-            killClientMutexed(data.list, data.listMutex, data.clientId);
+            killClientMutexed(data.container, data.clientId);
             return;
         }
     }
     else
     {
         logger.printLog("Unknown connection refused !");
-        killClientMutexed(data.list, data.listMutex, data.clientId);
+        killClientMutexed(data.container, data.clientId);
         return;
     }
 
-    logger.printLog("Client sucessfully connected !");
-    data.listMutex->lock();
-    data.list->get(data.clientId)->isReady = true;
-    data.listMutex->unlock();
+    sf::sleep(sf::milliseconds(1000)); //give client time to receive the "accepted" message and start it's protocol
 
-    //KILLs THE THREAD
+    logger.printLog("Client sucessfully connected !");
+    data.container->containerMutex->lock();
+    data.container->list->get(data.clientId)->isReady = true;
+    data.container->selector->add(*data.container->list->get(data.clientId)->socket);
+    data.container->containerMutex->unlock();
+
+    //KILL THE THREAD
 }
 
 void setupListener(sf::TcpListener * listener, int port)
@@ -371,9 +396,9 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
 
     while(1)
     {
-        data.listMutex->lock();
-        bool isFull = (data.list->getSize() == data.maxClient);
-        data.listMutex->unlock();
+        data.container->containerMutex->lock();
+        bool isFull = (data.container->list->getSize() == data.maxClient);
+        data.container->containerMutex->unlock();
         if(isFull)
         {
             while(listenerAccept(&listener,acceptSocket))
@@ -395,12 +420,13 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
                     exit(1);
                 }
                 newClient->socket = acceptSocket;
-                data.listMutex->lock();
-                int ClientId = data.list->add(newClient);
-                data.listMutex->unlock();
+                data.container->containerMutex->lock();
+                data.container->selector->add(*newClient->socket);
+                int ClientId = data.container->list->add(newClient);
+                data.container->containerMutex->unlock();
                 
                 //create and launch a protocol connect thread
-                sf::Thread * newConnectThread = new sf::Thread(&connectProtocol,ConnectDataSet(data.list,data.listMutex,ClientId));
+                sf::Thread * newConnectThread = new sf::Thread(&connectProtocol,ConnectDataSet(data.container,ClientId));
                 if(newConnectThread == NULL)
                 {
                     printf("Failed to allocate thread\n");
@@ -411,9 +437,9 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
                 setupAcceptSocket(); //reset for the next Client
                 
 
-                data.listMutex->lock();
-                isFull = (data.list->getSize() == data.maxClient);
-                data.listMutex->unlock();
+                data.container->containerMutex->lock();
+                isFull = (data.container->list->getSize() == data.maxClient);
+                data.container->containerMutex->unlock();
                 if(isFull) // stops accepting if full
                 {
                     break;
@@ -427,45 +453,51 @@ void answerToClient(AnswerDataSet data) //AnswerDataSet = List<Client*> * list, 
 }
 
 
-void dispatchMessage(List<Client*> * list, Buffer * message, int senderId)
+void dispatchMessage(ClientsContainer * container, Buffer * message, int senderId)
 {
-    for(int i = 0 ; i < list->getSize() ; i++)
+    for(int i = 0 ; i < container->list->getSize() ; i++)
     {
         if(i != senderId)
         {
             logger.printDebug("dispatching ...");
-            if(sendBuffer(list->get(i)->socket,message))
+            if(sendBuffer(container->list->get(i)->socket,message))
             {
                 logger.printLog("Client disconnected !");
-                killClient(list,i);
+                killClient(container,i);
             }
         }
     }
 }
 
-void checkForInputs(List<Client*> * list, sf::Mutex * listMutex, Buffer * exchangeBuffer)
+void checkForInputs(CheckDataSet data)
 {
     Buffer workExchangeBuffer; // use a copy to keep the size
-    workExchangeBuffer.pointer = exchangeBuffer->pointer;
+    workExchangeBuffer.pointer = data.exchangeBuffer->pointer;
     
-    listMutex->lock();
-    for(int i = 0 ; i < list->getSize() ; i++)
+    while(1)
     {
-        if(list->get(i)->isReady)
+        data.container->containerMutex->lock();
+        data.container->selector->wait(sf::milliseconds(100)); // waits for data, 100ms timeout (give a chance to unlock other threads)
+        for(int i = 0 ; i < data.container->list->getSize() ; i++)
         {
-            if(receiveBuffer(list->get(i)->socket,&workExchangeBuffer,exchangeBuffer->size))
+            if(data.container->list->get(i)->isReady && 
+               data.container->selector->isReady(*data.container->list->get(i)->socket))
             {
-                logger.printLog("Client disconnected !");
-                killClient(list,i);
-            }
-            if(workExchangeBuffer.size > 0)
-            {
-                logger.printDebug("Got data, dispatching");
-                dispatchMessage(list,&workExchangeBuffer,i);                
+                if(receiveBuffer(data.container->list->get(i)->socket,&workExchangeBuffer,data.exchangeBuffer->size))
+                {
+                    logger.printLog("Client disconnected !");
+                    killClient(data.container,i);
+                }
+                if(workExchangeBuffer.size > 0)
+                {
+                    logger.printDebug("Got data, dispatching");
+                    dispatchMessage(data.container,&workExchangeBuffer,i);                
+                }
             }
         }
-    }
-    listMutex->unlock();
+        data.container->containerMutex->unlock();
+        sf::sleep(sf::milliseconds(1)); // give time for the other threads
+    }    
 }
 
 
@@ -501,18 +533,26 @@ int main (int argc, const char * argv[])
     
     List<Client*> list;
     sf::Mutex listMutex;
+
+    sf::SocketSelector selector;
     
     Buffer exchangeBuffer;
     setupExchangeBuffer(&exchangeBuffer, bufferSize);
 
     logger.printLog("Init'ed ...");
     
-    sf::Thread answerThread(&answerToClient,AnswerDataSet(&list,&listMutex,port,maxClient));
+    ClientsContainer container(&list,&listMutex,&selector);
+    
+    
+    sf::Thread answerThread(&answerToClient,AnswerDataSet(&container,port,maxClient));
     answerThread.launch();
+
+
+    sf::Thread checkThread(&checkForInputs,CheckDataSet(&container,&exchangeBuffer));
+    checkThread.launch();
     
     while(1) //TODO receive system interrupts
     {
-        checkForInputs(&list, &listMutex,&exchangeBuffer);
         sf::sleep(sf::milliseconds(5));
     }
     
